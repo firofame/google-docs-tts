@@ -1,0 +1,19 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "google-docs-tts"
+version = "0.1.0"
+description = "Generate MP3 audio from text files using Google Docs Text-to-Speech."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "cloakbrowser",
+    "google-api-python-client",
+    "google-auth-httplib2",
+    "google-auth-oauthlib",
+]
+
+[project.scripts]
+google-docs-tts = "google_docs_tts.cli:run"

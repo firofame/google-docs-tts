@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+build/
+dist/
+*.egg-info/
+
+# Local credentials and tokens
+.env
+credentials.json
+google_token.json
+*.key
+
+# Runtime artifacts
+debug/
+*.mp3
+ffmpeg_concat_list.txt
+
+# OS
+.DS_Store
+Thumbs.db
