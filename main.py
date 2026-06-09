@@ -95,8 +95,8 @@ def parse_args() -> Args:
 
     if not args:
         print(
-            'Usage: python tts.py [--debug] [--headless] [--no-headless] --login | input_path [output_path|output_dir]\n'
-            '       python tts.py [--debug] [--headless] [--no-headless] input_file1 [input_file2 ...] [output_dir]',
+            'Usage: python main.py [--debug] [--headless] [--no-headless] --login | input_path [output_path|output_dir]\n'
+            '       python main.py [--debug] [--headless] [--no-headless] input_file1 [input_file2 ...] [output_dir]',
             file=sys.stderr,
         )
         sys.exit(1)
@@ -154,7 +154,6 @@ def parse_args() -> Args:
             jobs.append(FileJob(input_path=f, output_path=out_path))
 
     return Args(jobs=jobs)
-
 
 
 def split_text(text: str) -> list[str]:
@@ -245,7 +244,6 @@ def normalize_first_line(text: str) -> str:
     lines[0] = first_line
 
     return '\n'.join(lines)
-
 
 
 async def click(page: Any, selector: str):
@@ -439,13 +437,13 @@ async def process_chunk(page: Any, creds: Any, doc_id: str, text: str, output_pa
 
         print('Saving...')
         await save_blob(page, blob_url, output_path)
-        print(f'\u2705 {output_path}')
+        print(f'✅ {output_path}')
 
         return blob_url
     except Exception as err:
         await debug_screenshot('error')
         await close_player(page)
-        print(f'\u274c Chunk failed: {err}')
+        print(f'❌ Chunk failed: {err}')
         raise
 
 

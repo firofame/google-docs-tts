@@ -323,7 +323,7 @@ wheels = [
 [[package]]
 name = "google-docs-tts"
 version = "0.1.0"
-source = { editable = "." }
+source = { virtual = "." }
 dependencies = [
     { name = "google-api-python-client" },
     { name = "google-auth-httplib2" },

@@ -89,7 +89,7 @@ The tool requires two levels of authentication:
 ### Step 2: Browser Session Login
 To save your Google account login session to the persistent browser profile:
 ```bash
-uv run google-docs-tts --login
+uv run main.py --login
 ```
 This launches a visible Chromium browser window. Log in to your Google Account (the one that has access to the target Google Doc) and resolve any 2FA prompts. Once the document editor is successfully loaded, return to the terminal and press **Enter** to save the session and close the browser.
 
@@ -101,19 +101,13 @@ This launches a visible Chromium browser window. Log in to your Google Account (
 
 ```bash
 # Convert a single file (outputs to path/to/input.mp3)
-uv run google-docs-tts path/to/input.txt
+uv run main.py path/to/input.txt
 
 # Convert a single file and specify a custom output path
-uv run google-docs-tts path/to/input.txt path/to/output.mp3
+uv run main.py path/to/input.txt path/to/output.mp3
 
 # Convert all .txt and .md files in a directory to an output directory
-uv run google-docs-tts path/to/input-dir path/to/output-dir
-```
-
-### Compatibility Wrapper
-You can also run the script directly:
-```bash
-uv run tts.py path/to/input.txt
+uv run main.py path/to/input-dir path/to/output-dir
 ```
 
 ### Command Line Flags
@@ -125,7 +119,7 @@ uv run tts.py path/to/input.txt
 
 ## ⚙ Configuration
 
-You can customize the script settings by editing the `CONFIG` dictionary in [`src/google_docs_tts/cli.py`](file:///home/firoz/Desktop/google-docs-tts/src/google_docs_tts/cli.py):
+You can customize the script settings by editing the `CONFIG` dictionary in [`main.py`](file:///home/firoz/Desktop/google-docs-tts/main.py):
 
 | Config Key | Default Value | Description |
 | :--- | :--- | :--- |
