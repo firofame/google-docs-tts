@@ -9,7 +9,7 @@ description = "Generate MP3 audio from text files using Google Docs Text-to-Spee
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "cloakbrowser",
+    "playwright",
     "google-api-python-client",
     "google-auth-httplib2",
     "google-auth-oauthlib",

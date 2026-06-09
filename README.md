@@ -1,7 +1,7 @@
 # Google Docs TTS
 
 Standalone command line tool for generating MP3 audio from `.txt` and `.md`
-files using Google Docs Text-to-Speech through CloakBrowser.
+files using Google Docs Text-to-Speech through Playwright / CDP.
 
 ## Setup
 

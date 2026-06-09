@@ -1,4 +1,4 @@
-"""Command line Text-to-Speech converter using Google Docs and CloakBrowser."""
+"""Command line Text-to-Speech converter using Google Docs and Playwright/CDP."""
 
 import os
 import sys
@@ -10,7 +10,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 from dataclasses import dataclass
-from cloakbrowser import launch_persistent_context_async
+from playwright.async_api import async_playwright
 
 # Google API Client Imports
 from google.oauth2 import service_account
@@ -26,7 +26,7 @@ CONFIG = {
     'timeout': 120_000,
     'retry_attempts': 3,
     'retry_delay_seconds': 5,
-    'profile_dir': Path.home() / '.cloakbrowser-profile',
+    'profile_dir': Path.home() / '.google-docs-tts-profile',
     'login_window_size': (1100, 700),
     'debug': True,
     'save_success_screenshots': False,
@@ -133,10 +133,14 @@ def parse_args() -> Args:
         CONFIG['headless'] = True
         args.remove('--headless')
 
+    if '--no-headless' in args:
+        CONFIG['headless'] = False
+        args.remove('--no-headless')
+
     if not args:
         print(
-            'Usage: python tts.py [--debug] [--headless] --login | input_path [output_path|output_dir]\n'
-            '       python tts.py [--debug] [--headless] input_file1 [input_file2 ...] [output_dir]',
+            'Usage: python tts.py [--debug] [--headless] [--no-headless] --login | input_path [output_path|output_dir]\n'
+            '       python tts.py [--debug] [--headless] [--no-headless] input_file1 [input_file2 ...] [output_dir]',
             file=sys.stderr,
         )
         sys.exit(1)
@@ -461,7 +465,7 @@ async def process_chunk(page: Any, creds: Any, doc_id: str, text: str, output_pa
 
 
 async def open_tts_page(context):
-    """Open a page in the persistent CloakBrowser profile."""
+    """Open a page in the Playwright browser context."""
     # Use the default persistent page if it exists, otherwise create a new one
     page = context.pages[0] if context.pages else await context.new_page()
     await page.goto(CONFIG['doc_url'], wait_until='domcontentloaded')
@@ -489,15 +493,41 @@ async def main():
     # Force visible browser for login flow
     is_headless = CONFIG['headless'] if not args.login_only else False
 
-    # Initialize CloakBrowser context
-    context = await launch_persistent_context_async(
-        user_data_dir=str(CONFIG['profile_dir']),
-        headless=is_headless,
-        viewport={'width': CONFIG['login_window_size'][0], 'height': CONFIG['login_window_size'][1]},
-        args=['--mute-audio']  # Replaces Firefox volume prefs to keep generation silent
-    )
-
+    p = await async_playwright().start()
+    browser = None
     try:
+        if args.login_only:
+            print(f"Launching local persistent visible Chromium browser to save login session (Profile: {CONFIG['profile_dir']})...")
+            context = await p.chromium.launch_persistent_context(
+                user_data_dir=str(CONFIG['profile_dir']),
+                headless=False,
+                viewport={'width': CONFIG['login_window_size'][0], 'height': CONFIG['login_window_size'][1]},
+                ignore_default_args=['--enable-automation'],
+                args=['--disable-blink-features=AutomationControlled', '--mute-audio']
+            )
+        elif is_headless:
+            print(f"Launching local persistent headless Chromium browser (Profile: {CONFIG['profile_dir']})...")
+            context = await p.chromium.launch_persistent_context(
+                user_data_dir=str(CONFIG['profile_dir']),
+                headless=True,
+                viewport={'width': CONFIG['login_window_size'][0], 'height': CONFIG['login_window_size'][1]},
+                ignore_default_args=['--enable-automation'],
+                args=['--disable-blink-features=AutomationControlled', '--mute-audio']
+            )
+        else:
+            cdp_url = os.getenv("CDP_URL", "http://127.0.0.1:9222")
+            print(f"Connecting to browser via CDP at {cdp_url}...")
+            try:
+                browser = await p.chromium.connect_over_cdp(cdp_url)
+                context = browser.contexts[0] if browser.contexts else await browser.new_context()
+            except Exception as e:
+                print(
+                    f"❌ Failed to connect to browser via CDP at {cdp_url}. "
+                    "Ensure Microsoft Edge/Chrome is running with --remote-debugging-port=9222",
+                    file=sys.stderr
+                )
+                raise e
+
         if args.login_only:
             await login_flow(context)
             print('Login session saved.')
@@ -610,7 +640,12 @@ async def main():
         finally:
             await page.close()
     finally:
-        await context.close()
+        if 'context' in locals() and not browser:
+            try:
+                await context.close()
+            except Exception:
+                pass
+        await p.stop()
 
 
 def run() -> None:
