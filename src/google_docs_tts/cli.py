@@ -5,7 +5,6 @@ import sys
 import base64
 import asyncio
 import re
-import json
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -14,9 +13,6 @@ from playwright.async_api import async_playwright
 
 # Google API Client Imports
 from google.oauth2 import service_account
-from google.oauth2.credentials import Credentials as UserCredentials
-from google_auth_oauthlib.flow import InstalledAppFlow
-from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 
 # Configuration
@@ -24,15 +20,11 @@ CONFIG = {
     'doc_url': 'https://docs.google.com/document/d/1WVxgs-UywesdGppo1zLFR-YA57TQiwEpXDjKoq9EfyM/edit?usp=sharing',
     'max_chunk_length': 20_000,
     'timeout': 120_000,
-    'retry_attempts': 3,
-    'retry_delay_seconds': 5,
     'profile_dir': Path.home() / '.google-docs-tts-profile',
-    'login_window_size': (1100, 700),
     'debug': True,
     'save_success_screenshots': False,
     'headless': True,
     'google_credentials_json': 'credentials.json',
-    'google_token_json': 'google_token.json',
 }
 
 SELECTORS = {
@@ -53,58 +45,22 @@ def get_doc_id(url: str) -> str:
 
 
 def get_google_credentials():
-    """Retrieve Google credentials (supports Service Account and User OAuth flows)."""
+    """Retrieve Google Service Account credentials."""
     creds_path = CONFIG['google_credentials_json']
-    token_path = CONFIG['google_token_json']
     scopes = ['https://www.googleapis.com/auth/documents']
     
-    # 1. Try to load service account credentials if the file exists and is a service account
-    if os.path.exists(creds_path):
-        try:
-            with open(creds_path, 'r') as f:
-                data = json.load(f)
-            if data.get('type') == 'service_account':
-                print(f"Using Google Service Account from '{creds_path}'")
-                return service_account.Credentials.from_service_account_file(creds_path, scopes=scopes)
-        except Exception as e:
-            print(f"Error checking service account: {e}")
-            
-    # 2. Try loading user credentials from saved token
-    creds = None
-    if os.path.exists(token_path):
-        try:
-            creds = UserCredentials.from_authorized_user_file(token_path, scopes)
-        except Exception as e:
-            print(f"Error loading saved token: {e}")
-
-    # If no valid token, but we have credentials file, run OAuth flow
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            print("Refreshing expired Google credentials...")
-            try:
-                creds.refresh(Request())
-            except Exception as e:
-                print(f"Error refreshing token: {e}")
-                creds = None
-                
-        if not creds:
-            if not os.path.exists(creds_path):
-                raise FileNotFoundError(
-                    f"Google credentials file not found at '{creds_path}'.\n"
-                    f"Please obtain a Google Cloud credentials JSON (Service Account or OAuth client) "
-                    f"and save it to '{creds_path}'."
-                )
-            
-            print(f"Starting Google OAuth flow using '{creds_path}'...")
-            flow = InstalledAppFlow.from_client_secrets_file(creds_path, scopes)
-            creds = flow.run_local_server(port=0)
-            
-            # Save token for next time
-            with open(token_path, 'w') as token:
-                token.write(creds.to_json())
-                print(f"Saved OAuth token to '{token_path}'")
-                
-    return creds
+    if not os.path.exists(creds_path):
+        raise FileNotFoundError(
+            f"Google credentials file not found at '{creds_path}'.\n"
+            f"Please obtain a Google Cloud Service Account credentials JSON "
+            f"and save it to '{creds_path}'."
+        )
+        
+    try:
+        print(f"Using Google Service Account from '{creds_path}'")
+        return service_account.Credentials.from_service_account_file(creds_path, scopes=scopes)
+    except Exception as e:
+        raise RuntimeError(f"Error loading service account credentials from '{creds_path}': {e}")
 
 
 @dataclass
@@ -235,27 +191,26 @@ def get_clean_title(filename_stem: str) -> str:
     return cleaned
 
 
-def normalize_lines(text: str, num_lines: int = 1) -> str:
-    """Normalize the first N lines of a chunk for Google Docs TTS.
+def normalize_first_line(text: str) -> str:
+    """Normalize the first line of a chunk for Google Docs TTS.
 
     Google Docs TTS often fails to process the very first sentence.
-    Fix: replace all breakable punctuation with periods on the first N lines,
-    or append a period if a line has no punctuation at all.
-    On retries, num_lines is increased to normalize deeper into the text.
+    Fix: replace all breakable punctuation with periods on the first line,
+    or append a period if the first line has no punctuation at all.
     """
     punctuation_marks = ',;:?!،؛؟'
     lines = text.split('\n')
-    limit = min(num_lines, len(lines))
+    if not lines:
+        return text
 
-    for i in range(limit):
-        line = lines[i]
-        has_punctuation = any(m in line for m in punctuation_marks)
-        if has_punctuation:
-            for mark in punctuation_marks:
-                line = line.replace(mark, '.')
-        elif not line.rstrip().endswith('.'):
-            line = line.rstrip() + '.'
-        lines[i] = line
+    first_line = lines[0]
+    has_punctuation = any(m in first_line for m in punctuation_marks)
+    if has_punctuation:
+        for mark in punctuation_marks:
+            first_line = first_line.replace(mark, '.')
+    elif not first_line.rstrip().endswith('.'):
+        first_line = first_line.rstrip() + '.'
+    lines[0] = first_line
 
     return '\n'.join(lines)
 
@@ -274,7 +229,7 @@ async def wait_for_time_display(page: Any):
     )
 
 
-async def get_blob_url(page: Any, prev_url: str = '') -> str:
+async def get_blob_url(page: Any) -> str:
     """Get blob URL from audio player."""
     result = await page.wait_for_function(
         """() => {
@@ -404,7 +359,7 @@ async def insert_text(page: Any, creds: Any, doc_id: str, text: str):
     await asyncio.sleep(0.5)
 
 
-async def generate_audio(page: Any, prev_blob_url: str) -> str:
+async def generate_audio(page: Any) -> str:
     """Generate audio from document text."""
     # First trigger initializes, second generates
     for i in range(2):
@@ -415,12 +370,11 @@ async def generate_audio(page: Any, prev_blob_url: str) -> str:
         if i == 0:
             await close_player(page)
 
-    return await get_blob_url(page, prev_blob_url)
+    return await get_blob_url(page)
 
 
-async def process_chunk(page: Any, creds: Any, doc_id: str, text: str, output_path: Path, prev_blob_url: str) -> str:
-    """Process a single text chunk with retry on failure."""
-    attempts = CONFIG['retry_attempts']
+async def process_chunk(page: Any, creds: Any, doc_id: str, text: str, output_path: Path) -> str:
+    """Process a single text chunk."""
     debug_dir = output_path.parent / 'debug'
 
     async def debug_screenshot(name: str):
@@ -431,37 +385,30 @@ async def process_chunk(page: Any, creds: Any, doc_id: str, text: str, output_pa
         await page.screenshot(path=str(path))
         print(f'  📸 {path}')
 
-    for attempt in range(1, attempts + 1):
-        try:
-            # Normalize more lines on each attempt (1st line, then 2, then 3...)
-            normalized = normalize_lines(text, num_lines=attempt)
+    try:
+        # Normalize the first line of the chunk
+        normalized = normalize_first_line(text)
 
-            print(f'Inserting {len(normalized)} chars...')
-            await insert_text(page, creds, doc_id, normalized)
-            if CONFIG.get('save_success_screenshots', False):
-                await debug_screenshot(f'after_insert_attempt{attempt}')
+        print(f'Inserting {len(normalized)} chars...')
+        await insert_text(page, creds, doc_id, normalized)
+        if CONFIG.get('save_success_screenshots', False):
+            await debug_screenshot('after_insert')
 
-            print('Generating audio...')
-            blob_url = await generate_audio(page, prev_blob_url)
-            if CONFIG.get('save_success_screenshots', False):
-                await debug_screenshot(f'after_audio_attempt{attempt}')
+        print('Generating audio...')
+        blob_url = await generate_audio(page)
+        if CONFIG.get('save_success_screenshots', False):
+            await debug_screenshot('after_audio')
 
-            print('Saving...')
-            await save_blob(page, blob_url, output_path)
-            print(f'\u2705 {output_path}')
+        print('Saving...')
+        await save_blob(page, blob_url, output_path)
+        print(f'\u2705 {output_path}')
 
-            return blob_url
-        except Exception as err:
-            await debug_screenshot(f'error_attempt{attempt}')
-            await close_player(page)
-            if attempt < attempts:
-                delay = CONFIG['retry_delay_seconds'] * attempt
-                print(f'\u26a0\ufe0f  Chunk failed (attempt {attempt}/{attempts}): {err}')
-                print(f'   Normalizing {attempt + 1} lines and retrying in {delay}s...')
-                await asyncio.sleep(delay)
-            else:
-                print(f'\u274c Chunk failed after {attempts} attempts: {err}')
-                raise
+        return blob_url
+    except Exception as err:
+        await debug_screenshot('error')
+        await close_player(page)
+        print(f'\u274c Chunk failed: {err}')
+        raise
 
 
 async def open_tts_page(context):
@@ -483,50 +430,33 @@ async def login_flow(context):
     await page.close()
 
 
-
 async def main():
     """Main entry point."""
     args = parse_args()
 
     CONFIG['profile_dir'].mkdir(parents=True, exist_ok=True)
 
-    # Force visible browser for login flow
     is_headless = CONFIG['headless'] if not args.login_only else False
 
     p = await async_playwright().start()
-    browser = None
     try:
-        if args.login_only:
-            print(f"Launching local persistent visible Chromium browser to save login session (Profile: {CONFIG['profile_dir']})...")
-            context = await p.chromium.launch_persistent_context(
-                user_data_dir=str(CONFIG['profile_dir']),
-                headless=False,
-                viewport={'width': CONFIG['login_window_size'][0], 'height': CONFIG['login_window_size'][1]},
-                ignore_default_args=['--enable-automation'],
-                args=['--disable-blink-features=AutomationControlled', '--mute-audio']
-            )
-        elif is_headless:
+        if is_headless:
             print(f"Launching local persistent headless Chromium browser (Profile: {CONFIG['profile_dir']})...")
             context = await p.chromium.launch_persistent_context(
                 user_data_dir=str(CONFIG['profile_dir']),
                 headless=True,
-                viewport={'width': CONFIG['login_window_size'][0], 'height': CONFIG['login_window_size'][1]},
                 ignore_default_args=['--enable-automation'],
                 args=['--disable-blink-features=AutomationControlled', '--mute-audio']
             )
         else:
-            cdp_url = os.getenv("CDP_URL", "http://127.0.0.1:9222")
-            print(f"Connecting to browser via CDP at {cdp_url}...")
-            try:
-                browser = await p.chromium.connect_over_cdp(cdp_url)
-                context = browser.contexts[0] if browser.contexts else await browser.new_context()
-            except Exception as e:
-                print(
-                    f"❌ Failed to connect to browser via CDP at {cdp_url}. "
-                    "Ensure Microsoft Edge/Chrome is running with --remote-debugging-port=9222",
-                    file=sys.stderr
-                )
-                raise e
+            mode_desc = "to save login session " if args.login_only else ""
+            print(f"Launching local persistent visible Chromium browser {mode_desc}(Profile: {CONFIG['profile_dir']})...")
+            context = await p.chromium.launch_persistent_context(
+                user_data_dir=str(CONFIG['profile_dir']),
+                headless=False,
+                ignore_default_args=['--enable-automation'],
+                args=['--disable-blink-features=AutomationControlled', '--mute-audio']
+            )
 
         if args.login_only:
             await login_flow(context)
@@ -586,9 +516,6 @@ async def main():
                 else:
                     spoken_title = cleaned_title
 
-                last_blob_url = ''
-                all_chunks_skipped = True
-
                 for i, chunk in enumerate(chunks):
                     print(f'\n--- Chunk {i + 1}/{len(chunks)} ---')
 
@@ -601,8 +528,6 @@ async def main():
                     if out.exists() and out.stat().st_size > 0:
                         print(f'⏭️  {out} already exists, skipping.')
                         continue
-
-                    all_chunks_skipped = False
                     
                     # Prepend spoken title to the first chunk only
                     if i == 0:
@@ -610,7 +535,7 @@ async def main():
                     else:
                         chunk_to_process = chunk
 
-                    last_blob_url = await process_chunk(page, google_creds, doc_id, chunk_to_process, out, last_blob_url)
+                    await process_chunk(page, google_creds, doc_id, chunk_to_process, out)
                     await close_player(page)
 
                 # Concatenate multiple audio chunks into a single file
@@ -640,7 +565,7 @@ async def main():
         finally:
             await page.close()
     finally:
-        if 'context' in locals() and not browser:
+        if 'context' in locals():
             try:
                 await context.close()
             except Exception:
