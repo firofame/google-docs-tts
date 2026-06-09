@@ -159,12 +159,44 @@ def parse_args() -> Args:
 
 def split_text(text: str) -> list[str]:
     """Split text into chunks that fit within maxChunkLength."""
+    max_len = CONFIG['max_chunk_length']
     chunks = []
     current = ''
 
-    for line in text.split('\n'):
+    # Step 1: Pre-process lines
+    lines = text.split('\n')
+    processed_lines = []
+    
+    for line in lines:
+        if len(line) <= max_len:
+            processed_lines.append(line)
+        else:
+            # Settle extremely long lines by splitting on space boundaries
+            words = line.split(' ')
+            sub_line = ''
+            for word in words:
+                # If a single word itself exceeds the limit, hard-slice it
+                if len(word) > max_len:
+                    if sub_line:
+                        processed_lines.append(sub_line)
+                        sub_line = ''
+                    # Break the giant word down into strict character slices
+                    for i in range(0, len(word), max_len):
+                        processed_lines.append(word[i:i + max_len])
+                    continue
 
-        if current and len(current) + len(line) + 1 > CONFIG['max_chunk_length']:
+                if len(sub_line) + len(word) + 1 > max_len:
+                    if sub_line:
+                        processed_lines.append(sub_line)
+                    sub_line = word
+                else:
+                    sub_line = f"{sub_line} {word}".strip() if sub_line else word
+            if sub_line:
+                processed_lines.append(sub_line)
+
+    # Step 2: Group processed lines into final chunks
+    for line in processed_lines:
+        if current and len(current) + len(line) + 1 > max_len:
             chunks.append(current)
             current = ''
         current += ('\n' if current else '') + line
@@ -354,8 +386,14 @@ async def insert_text(page: Any, creds: Any, doc_id: str, text: str):
     # Focus the editor and scroll/jump cursor to top so TTS is triggered from the beginning
     await click(page, SELECTORS['editor'])
     await asyncio.sleep(0.5)
-    mod = 'Meta' if sys.platform == 'darwin' else 'Control'
-    await page.keyboard.press(f'{mod}+Home')
+    # Reset cursor to the start of the document
+    if sys.platform == 'darwin':
+        # On macOS, Cmd + Up Arrow jumps to the top of the document
+        await page.keyboard.press('Meta+ArrowUp')
+    else:
+        # On Windows/Linux, Ctrl + Home jumps to the top of the document
+        await page.keyboard.press('Control+Home')
+
     await asyncio.sleep(0.5)
 
 
