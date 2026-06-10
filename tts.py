@@ -95,8 +95,8 @@ def parse_args() -> Args:
 
     if not args:
         print(
-            'Usage: python main.py [--debug] [--headless] [--no-headless] --login | input_path [output_path|output_dir]\n'
-            '       python main.py [--debug] [--headless] [--no-headless] input_file1 [input_file2 ...] [output_dir]',
+            'Usage: python tts.py [--debug] [--headless] [--no-headless] --login | input_path [output_path|output_dir]\n'
+            '       python tts.py [--debug] [--headless] [--no-headless] input_file1 [input_file2 ...] [output_dir]',
             file=sys.stderr,
         )
         sys.exit(1)
