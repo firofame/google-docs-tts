@@ -156,6 +156,80 @@ def parse_args() -> Args:
     return Args(jobs=jobs)
 
 
+def split_long_sentence(sentence: str, max_len: int = 280) -> list[str]:
+    """Split a sentence into smaller chunks to avoid Google Docs TTS limits."""
+    if len(sentence) <= max_len:
+        return [sentence]
+    
+    words = sentence.split(' ')
+    parts = []
+    current_part = []
+    current_len = 0
+    
+    for word in words:
+        word_len = len(word) + (1 if current_len > 0 else 0)
+        if current_len + word_len <= max_len - 1:
+            current_part.append(word)
+            current_len += word_len
+        else:
+            if current_part:
+                part_text = ' '.join(current_part)
+                if not part_text.rstrip().endswith('.'):
+                    part_text = part_text.rstrip() + '.'
+                parts.append(part_text)
+            current_part = [word]
+            current_len = len(word)
+            
+    if current_part:
+        part_text = ' '.join(current_part)
+        parts.append(part_text)
+        
+    return parts
+
+
+def process_text_by_splitting_sentences(text: str, max_sentence_len: int = 280) -> str:
+    """Process all paragraphs in the text, splitting any extra-long sentences."""
+    paragraphs = text.split('\n')
+    processed_paragraphs = []
+    for para in paragraphs:
+        if not para.strip():
+            processed_paragraphs.append(para)
+            continue
+        
+        # Split paragraph into sentences using basic sentence-ending punctuation
+        raw_sentences = re.split(r'(?<=[.!?])\s+', para)
+        new_sentences = []
+        for s in raw_sentences:
+            s_clean = s.strip()
+            if not s_clean:
+                continue
+            split_s = split_long_sentence(s_clean, max_sentence_len)
+            new_sentences.extend(split_s)
+        
+        processed_paragraphs.append(" ".join(new_sentences))
+    return "\n".join(processed_paragraphs)
+
+
+def dissect_first_long_sentence(text: str, max_len: int = 280) -> tuple[str, bool]:
+    """Find and split the first sentence in text that is longer than max_len."""
+    paragraphs = text.split('\n')
+    for i, para in enumerate(paragraphs):
+        if not para.strip():
+            continue
+        
+        # Split paragraph into sentences using basic sentence-ending punctuation
+        raw_sentences = re.split(r'(?<=[.!?])\s+', para)
+        for j, s in enumerate(raw_sentences):
+            s_clean = s.strip()
+            if len(s_clean) > max_len:
+                split_parts = split_long_sentence(s_clean, max_len)
+                if len(split_parts) > 1:
+                    raw_sentences[j] = " ".join(split_parts)
+                    paragraphs[i] = " ".join(raw_sentences)
+                    return "\n".join(paragraphs), True
+    return text, False
+
+
 def split_text(text: str) -> list[str]:
     """Split text into chunks that fit within maxChunkLength."""
     max_len = CONFIG['max_chunk_length']
@@ -222,28 +296,6 @@ def get_clean_title(filename_stem: str) -> str:
     return cleaned
 
 
-def normalize_first_line(text: str) -> str:
-    """Normalize the first line of a chunk for Google Docs TTS.
-
-    Google Docs TTS often fails to process the very first sentence.
-    Fix: replace all breakable punctuation with periods on the first line,
-    or append a period if the first line has no punctuation at all.
-    """
-    punctuation_marks = ',;:?!،؛؟'
-    lines = text.split('\n')
-    if not lines:
-        return text
-
-    first_line = lines[0]
-    has_punctuation = any(m in first_line for m in punctuation_marks)
-    if has_punctuation:
-        for mark in punctuation_marks:
-            first_line = first_line.replace(mark, '.')
-    elif not first_line.rstrip().endswith('.'):
-        first_line = first_line.rstrip() + '.'
-    lines[0] = first_line
-
-    return '\n'.join(lines)
 
 
 async def click(page: Any, selector: str):
@@ -400,7 +452,25 @@ async def generate_audio(page: Any) -> str:
     # First trigger initializes, second generates
     for i in range(2):
         await click(page, SELECTORS['tts_button'])
-        await page.wait_for_selector(SELECTORS['player_max_time'], timeout=CONFIG['timeout'])
+        
+        # Wait for the player to appear or fail early if an error toast appears
+        timeout_ms = CONFIG['timeout']
+        start_time = asyncio.get_event_loop().time()
+        while True:
+            if await page.locator(SELECTORS['player_max_time']).is_visible():
+                break
+            
+            # Check for error toast
+            error_loc = page.locator("text=Audio generation was unsuccessful")
+            if await error_loc.is_visible():
+                raise RuntimeError("Google Docs TTS error: Audio generation was unsuccessful")
+                
+            elapsed_ms = (asyncio.get_event_loop().time() - start_time) * 1000
+            if elapsed_ms >= timeout_ms:
+                raise asyncio.TimeoutError("Timeout waiting for audio player to appear")
+            
+            await asyncio.sleep(0.5)
+
         await wait_for_time_display(page)
 
         if i == 0:
@@ -422,11 +492,8 @@ async def process_chunk(page: Any, creds: Any, doc_id: str, text: str, output_pa
         print(f'  📸 {path}')
 
     try:
-        # Normalize the first line of the chunk
-        normalized = normalize_first_line(text)
-
-        print(f'Inserting {len(normalized)} chars...')
-        await insert_text(page, creds, doc_id, normalized)
+        print(f'Inserting {len(text)} chars...')
+        await insert_text(page, creds, doc_id, text)
         if CONFIG.get('save_success_screenshots', False):
             await debug_screenshot('after_insert')
 
@@ -571,8 +638,20 @@ async def main():
                     else:
                         chunk_to_process = chunk
 
-                    await process_chunk(page, google_creds, doc_id, chunk_to_process, out)
-                    await close_player(page)
+                    current_text = chunk_to_process
+                    while True:
+                        try:
+                            await process_chunk(page, google_creds, doc_id, current_text, out)
+                            await close_player(page)
+                            break
+                        except RuntimeError as err:
+                            if "Audio generation was unsuccessful" in str(err):
+                                new_text, split_done = dissect_first_long_sentence(current_text, 280)
+                                if split_done:
+                                    print("⚠️ Audio generation failed. Dissecting the first long sentence and retrying...")
+                                    current_text = new_text
+                                    continue
+                            raise
 
                 # Concatenate multiple audio chunks into a single file
                 if len(chunks) > 1:
