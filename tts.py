@@ -362,17 +362,17 @@ def concatenate_audio_chunks(chunk_paths: list[Path], output_path: Path) -> bool
 
 async def save_blob(page: Any, blob_url: str, output_path: Path):
     """Download blob and save to file."""
-    base64_data = await page.evaluate("""async (url) => {
-        const res = await fetch(url);
-        const blob = await res.blob();
-        return new Promise((resolve) => {
-            const reader = new FileReader();
-            reader.onload = () => resolve(reader.result.split(',')[1]);
-            reader.readAsDataURL(blob);
-        });
-    }""", blob_url)
-
-    output_path.write_bytes(base64.b64decode(base64_data))
+    async with page.expect_download() as download_info:
+        await page.evaluate("""(url) => {
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = 'audio.mp3';
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+        }""", blob_url)
+    download = await download_info.value
+    await download.save_as(str(output_path))
 
 
 async def close_player(page: Any):
@@ -548,6 +548,7 @@ async def main():
             context = await p.chromium.launch_persistent_context(
                 user_data_dir=str(CONFIG['profile_dir']),
                 headless=True,
+                bypass_csp=True,
                 ignore_default_args=['--enable-automation'],
                 args=['--disable-blink-features=AutomationControlled', '--mute-audio']
             )
@@ -557,6 +558,7 @@ async def main():
             context = await p.chromium.launch_persistent_context(
                 user_data_dir=str(CONFIG['profile_dir']),
                 headless=False,
+                bypass_csp=True,
                 ignore_default_args=['--enable-automation'],
                 args=['--disable-blink-features=AutomationControlled', '--mute-audio']
             )
