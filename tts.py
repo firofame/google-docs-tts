@@ -93,10 +93,15 @@ def parse_args() -> Args:
         CONFIG['headless'] = False
         args.remove('--no-headless')
 
+    use_opus = True
+    if '--opus' in args:
+        use_opus = True
+        args.remove('--opus')
+
     if not args:
         print(
-            'Usage: python tts.py [--debug] [--headless] [--no-headless] --login | input_path [output_path|output_dir]\n'
-            '       python tts.py [--debug] [--headless] [--no-headless] input_file1 [input_file2 ...] [output_dir]',
+            'Usage: python tts.py [--debug] [--headless] [--no-headless] [--opus] --login | input_path [output_path|output_dir]\n'
+            '       python tts.py [--debug] [--headless] [--no-headless] [--opus] input_file1 [input_file2 ...] [output_dir]',
             file=sys.stderr,
         )
         sys.exit(1)
@@ -116,6 +121,7 @@ def parse_args() -> Args:
             resolved_paths.pop()
 
     jobs = []
+    suffix = '.opus' if use_opus else '.mp3'
 
     # If we have only one path left and it's a directory, expand it
     if len(resolved_paths) == 1 and resolved_paths[0].is_dir():
@@ -129,7 +135,7 @@ def parse_args() -> Args:
             sys.exit(1)
             
         for f in files:
-            out_path = (output_dir / f.with_suffix('.mp3').name) if output_dir else f.with_suffix('.mp3')
+            out_path = (output_dir / f.with_suffix(suffix).name) if output_dir else f.with_suffix(suffix)
             jobs.append(FileJob(input_path=f, output_path=out_path))
 
     elif len(resolved_paths) == 1:
@@ -137,12 +143,14 @@ def parse_args() -> Args:
         if f.is_dir():
             print(f"Error: {f} is a directory but expected files.", file=sys.stderr)
             sys.exit(1)
-        out_path = (output_dir / f.with_suffix('.mp3').name) if output_dir else f.with_suffix('.mp3')
+        out_path = (output_dir / f.with_suffix(suffix).name) if output_dir else f.with_suffix(suffix)
         jobs.append(FileJob(input_path=f, output_path=out_path))
 
     elif len(resolved_paths) == 2 and not output_dir:
         infile = resolved_paths[0]
         outfile = resolved_paths[1]
+        if not outfile.suffix:
+            outfile = outfile.with_suffix(suffix)
         jobs.append(FileJob(input_path=infile, output_path=outfile))
 
     else:
@@ -150,7 +158,7 @@ def parse_args() -> Args:
             if f.is_dir():
                 print(f"Error: {f} is a directory. Multiple inputs must be files.", file=sys.stderr)
                 sys.exit(1)
-            out_path = (output_dir / f.with_suffix('.mp3').name) if output_dir else f.with_suffix('.mp3')
+            out_path = (output_dir / f.with_suffix(suffix).name) if output_dir else f.with_suffix(suffix)
             jobs.append(FileJob(input_path=f, output_path=out_path))
 
     return Args(jobs=jobs)
@@ -329,9 +337,39 @@ def _ffmpeg_concat_line(path: Path) -> str:
     return f"file '{escaped}'\n"
 
 
+def convert_mp3_to_opus(mp3_path: Path, opus_path: Path) -> bool:
+    """Convert an MP3 file to Opus using ffmpeg."""
+    try:
+        result = subprocess.run(
+            [
+                'ffmpeg',
+                '-y',
+                '-i',
+                str(mp3_path),
+                '-c:a',
+                'libopus',
+                '-b:a',
+                '48k',  # Speech-optimized bitrate
+                str(opus_path),
+            ],
+            check=False,
+            capture_output=True,
+        )
+        if result.returncode != 0:
+            print(f"❌ ffmpeg conversion to Opus failed: {result.stderr.decode('utf-8', errors='replace')}", file=sys.stderr)
+        return result.returncode == 0
+    except Exception as e:
+        print(f"❌ Error running ffmpeg: {e}", file=sys.stderr)
+        return False
+
+
 def concatenate_audio_chunks(chunk_paths: list[Path], output_path: Path) -> bool:
-    """Concatenate MP3 chunks with ffmpeg if available."""
+    """Concatenate MP3 chunks with ffmpeg if available, encoding to Opus if output_path is .opus."""
     list_file = output_path.parent / 'ffmpeg_concat_list.txt'
+    target_is_opus = output_path.suffix.lower() == '.opus'
+    
+    # We use libopus codec if output_path is .opus, otherwise copy MP3 stream
+    codec_args = ['-c:a', 'libopus', '-b:a', '48k'] if target_is_opus else ['-c', 'copy']
 
     try:
         with open(list_file, 'w', encoding='utf-8') as f:
@@ -348,12 +386,14 @@ def concatenate_audio_chunks(chunk_paths: list[Path], output_path: Path) -> bool
                 '0',
                 '-i',
                 str(list_file),
-                '-c',
-                'copy',
+            ] + codec_args + [
                 str(output_path),
             ],
             check=False,
+            capture_output=True,
         )
+        if result.returncode != 0:
+            print(f"❌ ffmpeg concatenation failed: {result.stderr.decode('utf-8', errors='replace')}", file=sys.stderr)
         return result.returncode == 0
     finally:
         if list_file.exists():
@@ -621,13 +661,21 @@ async def main():
                 else:
                     spoken_title = cleaned_title
 
+                target_is_opus = job.output_path.suffix.lower() == '.opus'
+
                 for i, chunk in enumerate(chunks):
                     print(f'\n--- Chunk {i + 1}/{len(chunks)} ---')
 
                     if len(chunks) > 1:
-                        out = suffix_path(job.output_path, f'-{i + 1}')
+                        if target_is_opus:
+                            out = suffix_path(job.output_path.with_suffix('.mp3'), f'-{i + 1}')
+                        else:
+                            out = suffix_path(job.output_path, f'-{i + 1}')
                     else:
-                        out = job.output_path
+                        if target_is_opus:
+                            out = job.output_path.with_suffix('.mp3')
+                        else:
+                            out = job.output_path
 
                     # Resume support: skip chunks already on disk
                     if out.exists() and out.stat().st_size > 0:
@@ -657,10 +705,16 @@ async def main():
 
                 # Concatenate multiple audio chunks into a single file
                 if len(chunks) > 1:
-                    chunk_paths = [
-                        suffix_path(job.output_path, f'-{i + 1}')
-                        for i in range(len(chunks))
-                    ]
+                    if target_is_opus:
+                        chunk_paths = [
+                            suffix_path(job.output_path.with_suffix('.mp3'), f'-{i + 1}')
+                            for i in range(len(chunks))
+                        ]
+                    else:
+                        chunk_paths = [
+                            suffix_path(job.output_path, f'-{i + 1}')
+                            for i in range(len(chunks))
+                        ]
                     chunks_exist = all(chunk_path.exists() for chunk_path in chunk_paths)
                     
                     if chunks_exist:
@@ -677,6 +731,19 @@ async def main():
                             print(f'Individual chunks are preserved as {job.output_path.stem}-N{job.output_path.suffix}')
                     else:
                         print('⚠️  Cannot concatenate: not all chunk files are present.')
+                elif len(chunks) == 1 and target_is_opus:
+                    temp_mp3 = job.output_path.with_suffix('.mp3')
+                    if temp_mp3.exists():
+                        print('\nConverting single chunk to Opus...')
+                        if convert_mp3_to_opus(temp_mp3, job.output_path):
+                            temp_mp3.unlink()
+                            print(f'✅ Final audiobook saved as {job.output_path}')
+                        else:
+                            print('⚠️  Opus conversion failed. Preserving MP3 file.')
+                            try:
+                                temp_mp3.rename(job.output_path.with_suffix('.mp3'))
+                            except Exception:
+                                pass
 
             print('\nAll files processed successfully!')
         finally:

@@ -100,17 +100,21 @@ This launches a visible Chromium browser window. Log in to your Google Account (
 ### Standard Command
 
 ```bash
-# Convert a single file (outputs to path/to/input.mp3)
+# Convert a single file (outputs to path/to/input.mp3 by default)
 uv run tts.py path/to/input.txt
 
-# Convert a single file and specify a custom output path
-uv run tts.py path/to/input.txt path/to/output.mp3
+# Convert a single file to Opus directly by using .opus extension
+uv run tts.py path/to/input.txt path/to/output.opus
 
-# Convert all .txt and .md files in a directory to an output directory
+# Convert all .txt and .md files in a directory to an output directory (as MP3)
 uv run tts.py path/to/input-dir path/to/output-dir
+
+# Convert all .txt and .md files in a directory to an output directory as Opus
+uv run tts.py path/to/input-dir path/to/output-dir --opus
 ```
 
 ### Command Line Flags
+- `--opus`: Generate audio output in the high-efficiency Opus format instead of MP3 (uses ffmpeg with libopus).
 - `--headless`: Run Playwright in headless mode (default for file jobs).
 - `--no-headless`: Run Playwright in visible (headed) mode using the saved profile session. Use this to watch the automation run in a visible browser.
 - `--debug`: Prints detailed logs and saves screenshots to a `debug/` folder in the output directory if chunks fail or insert successfully.
