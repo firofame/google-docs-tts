@@ -75,6 +75,7 @@ class Args:
     """Command line arguments."""
     jobs: list[FileJob]
     login_only: bool = False
+    send_phone: str | None = None
 
 
 def parse_args() -> Args:
@@ -93,15 +94,24 @@ def parse_args() -> Args:
         CONFIG['headless'] = False
         args.remove('--no-headless')
 
-    use_opus = True
+    use_ogg = True
     if '--opus' in args:
-        use_opus = True
+        use_ogg = True
         args.remove('--opus')
+
+    send_phone = '919895822141'
+    if '--send' in args:
+        idx = args.index('--send')
+        if idx + 1 >= len(args):
+            print('Error: --send requires a phone number (e.g. --send 919876543210)', file=sys.stderr)
+            sys.exit(1)
+        send_phone = args[idx + 1]
+        del args[idx:idx + 2]
 
     if not args:
         print(
-            'Usage: python tts.py [--debug] [--headless] [--no-headless] [--opus] --login | input_path [output_path|output_dir]\n'
-            '       python tts.py [--debug] [--headless] [--no-headless] [--opus] input_file1 [input_file2 ...] [output_dir]',
+            'Usage: python tts.py [--debug] [--headless] [--no-headless] [--opus] [--send PHONE] --login | input_path [output_path|output_dir]\n'
+            '       python tts.py [--debug] [--headless] [--no-headless] [--opus] [--send PHONE] input_file1 [input_file2 ...] [output_dir]',
             file=sys.stderr,
         )
         sys.exit(1)
@@ -121,7 +131,7 @@ def parse_args() -> Args:
             resolved_paths.pop()
 
     jobs = []
-    suffix = '.opus' if use_opus else '.mp3'
+    suffix = '.ogg' if use_ogg else '.mp3'
 
     # If we have only one path left and it's a directory, expand it
     if len(resolved_paths) == 1 and resolved_paths[0].is_dir():
@@ -161,7 +171,7 @@ def parse_args() -> Args:
             out_path = (output_dir / f.with_suffix(suffix).name) if output_dir else f.with_suffix(suffix)
             jobs.append(FileJob(input_path=f, output_path=out_path))
 
-    return Args(jobs=jobs)
+    return Args(jobs=jobs, send_phone=send_phone)
 
 
 def split_long_sentence(sentence: str, max_len: int = 280) -> list[str]:
@@ -337,8 +347,8 @@ def _ffmpeg_concat_line(path: Path) -> str:
     return f"file '{escaped}'\n"
 
 
-def convert_mp3_to_opus(mp3_path: Path, opus_path: Path) -> bool:
-    """Convert an MP3 file to Opus using ffmpeg."""
+def convert_mp3_to_ogg_opus(mp3_path: Path, ogg_path: Path) -> bool:
+    """Convert an MP3 file to OGG/Opus matching WhatsApp voice note format."""
     try:
         result = subprocess.run(
             [
@@ -346,17 +356,19 @@ def convert_mp3_to_opus(mp3_path: Path, opus_path: Path) -> bool:
                 '-y',
                 '-i',
                 str(mp3_path),
-                '-c:a',
-                'libopus',
-                '-b:a',
-                '48k',  # Speech-optimized bitrate
-                str(opus_path),
+                '-c:a', 'libopus',
+                '-b:a', '64k',
+                '-ac', '1',           # mono
+                '-ar', '48000',       # 48 kHz sample rate (Opus native)
+                '-application', 'voip',
+                '-f', 'ogg',          # OGG container
+                str(ogg_path),
             ],
             check=False,
             capture_output=True,
         )
         if result.returncode != 0:
-            print(f"❌ ffmpeg conversion to Opus failed: {result.stderr.decode('utf-8', errors='replace')}", file=sys.stderr)
+            print(f"❌ ffmpeg conversion to OGG/Opus failed: {result.stderr.decode('utf-8', errors='replace')}", file=sys.stderr)
         return result.returncode == 0
     except Exception as e:
         print(f"❌ Error running ffmpeg: {e}", file=sys.stderr)
@@ -366,10 +378,17 @@ def convert_mp3_to_opus(mp3_path: Path, opus_path: Path) -> bool:
 def concatenate_audio_chunks(chunk_paths: list[Path], output_path: Path) -> bool:
     """Concatenate MP3 chunks with ffmpeg if available, encoding to Opus if output_path is .opus."""
     list_file = output_path.parent / 'ffmpeg_concat_list.txt'
-    target_is_opus = output_path.suffix.lower() == '.opus'
+    target_is_ogg = output_path.suffix.lower() == '.ogg'
     
-    # We use libopus codec if output_path is .opus, otherwise copy MP3 stream
-    codec_args = ['-c:a', 'libopus', '-b:a', '48k'] if target_is_opus else ['-c', 'copy']
+    # WhatsApp voice note compatible OGG/Opus encoding, or plain MP3 stream copy
+    codec_args = [
+        '-c:a', 'libopus',
+        '-b:a', '64k',
+        '-ac', '1',            # mono
+        '-ar', '48000',        # 48 kHz sample rate (Opus native)
+        '-application', 'voip',
+        '-f', 'ogg',           # OGG container
+    ] if target_is_ogg else ['-c', 'copy']
 
     try:
         with open(list_file, 'w', encoding='utf-8') as f:
@@ -577,6 +596,33 @@ async def main():
     """Main entry point."""
     args = parse_args()
 
+    # Set up WhatsApp sender if --send was provided
+    wa_page = None
+    wa_context = None
+    wa_playwright = None
+    if args.send_phone:
+        from send_whatsapp import (
+            inject_wpp,
+            send_voice_note,
+            wait_for_whatsapp_ready,
+            PROFILE_DIR as WA_PROFILE_DIR,
+            WA_JS_CDN,
+        )
+        WA_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+        wa_playwright = await async_playwright().start()
+        wa_context = await wa_playwright.chromium.launch_persistent_context(
+            user_data_dir=str(WA_PROFILE_DIR),
+            headless=False,
+            bypass_csp=True,
+            ignore_default_args=['--enable-automation'],
+            args=['--disable-blink-features=AutomationControlled'],
+        )
+        wa_page = wa_context.pages[0] if wa_context.pages else await wa_context.new_page()
+        await wa_page.goto('https://web.whatsapp.com/', wait_until='domcontentloaded')
+        await wait_for_whatsapp_ready(wa_page)
+        await inject_wpp(wa_page)
+        print('📱 WhatsApp Web ready for sending.')
+
     CONFIG['profile_dir'].mkdir(parents=True, exist_ok=True)
 
     is_headless = CONFIG['headless'] if not args.login_only else False
@@ -661,18 +707,18 @@ async def main():
                 else:
                     spoken_title = cleaned_title
 
-                target_is_opus = job.output_path.suffix.lower() == '.opus'
+                target_is_ogg = job.output_path.suffix.lower() == '.ogg'
 
                 for i, chunk in enumerate(chunks):
                     print(f'\n--- Chunk {i + 1}/{len(chunks)} ---')
 
                     if len(chunks) > 1:
-                        if target_is_opus:
+                        if target_is_ogg:
                             out = suffix_path(job.output_path.with_suffix('.mp3'), f'-{i + 1}')
                         else:
                             out = suffix_path(job.output_path, f'-{i + 1}')
                     else:
-                        if target_is_opus:
+                        if target_is_ogg:
                             out = job.output_path.with_suffix('.mp3')
                         else:
                             out = job.output_path
@@ -705,7 +751,7 @@ async def main():
 
                 # Concatenate multiple audio chunks into a single file
                 if len(chunks) > 1:
-                    if target_is_opus:
+                    if target_is_ogg:
                         chunk_paths = [
                             suffix_path(job.output_path.with_suffix('.mp3'), f'-{i + 1}')
                             for i in range(len(chunks))
@@ -731,19 +777,24 @@ async def main():
                             print(f'Individual chunks are preserved as {job.output_path.stem}-N{job.output_path.suffix}')
                     else:
                         print('⚠️  Cannot concatenate: not all chunk files are present.')
-                elif len(chunks) == 1 and target_is_opus:
+                elif len(chunks) == 1 and target_is_ogg:
                     temp_mp3 = job.output_path.with_suffix('.mp3')
                     if temp_mp3.exists():
-                        print('\nConverting single chunk to Opus...')
-                        if convert_mp3_to_opus(temp_mp3, job.output_path):
+                        print('\nConverting single chunk to OGG/Opus...')
+                        if convert_mp3_to_ogg_opus(temp_mp3, job.output_path):
                             temp_mp3.unlink()
                             print(f'✅ Final audiobook saved as {job.output_path}')
                         else:
-                            print('⚠️  Opus conversion failed. Preserving MP3 file.')
+                            print('⚠️  OGG/Opus conversion failed. Preserving MP3 file.')
                             try:
                                 temp_mp3.rename(job.output_path.with_suffix('.mp3'))
                             except Exception:
                                 pass
+
+                # Auto-send via WhatsApp if --send was provided
+                if wa_page and job.output_path.exists() and job.output_path.suffix.lower() == '.ogg':
+                    print(f'\n📱 Sending {job.output_path.name} to {args.send_phone}...')
+                    await send_voice_note(wa_page, args.send_phone, job.output_path)
 
             print('\nAll files processed successfully!')
         finally:
@@ -755,6 +806,15 @@ async def main():
             except Exception:
                 pass
         await p.stop()
+    finally:
+        # Clean up WhatsApp browser if opened
+        if wa_context:
+            try:
+                await wa_context.close()
+            except Exception:
+                pass
+        if wa_playwright:
+            await wa_playwright.stop()
 
 
 def run() -> None:
