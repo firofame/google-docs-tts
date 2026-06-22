@@ -794,7 +794,7 @@ async def main():
                 # Auto-send via WhatsApp if --send was provided
                 if wa_page and job.output_path.exists() and job.output_path.suffix.lower() == '.ogg':
                     print(f'\n📱 Sending {job.output_path.name} to {args.send_phone}...')
-                    await send_voice_note(wa_page, args.send_phone, job.output_path)
+                    await send_voice_note(wa_page, args.send_phone, job.output_path, title=spoken_title)
 
             print('\nAll files processed successfully!')
         finally:
@@ -805,8 +805,11 @@ async def main():
                 await context.close()
             except Exception:
                 pass
-        await p.stop()
-    finally:
+        if p:
+            try:
+                await p.stop()
+            except Exception:
+                pass
         # Clean up WhatsApp browser if opened
         if wa_context:
             try:
@@ -814,7 +817,10 @@ async def main():
             except Exception:
                 pass
         if wa_playwright:
-            await wa_playwright.stop()
+            try:
+                await wa_playwright.stop()
+            except Exception:
+                pass
 
 
 def run() -> None:

@@ -12,6 +12,7 @@ PHONE should include country code without '+' (e.g. 919876543210).
 """
 
 import sys
+import re
 import base64
 import asyncio
 from pathlib import Path
@@ -39,9 +40,38 @@ async def inject_wpp(page) -> None:
     print('✅ WPP ready')
 
 
-async def send_voice_note(page, phone: str, ogg_path: Path) -> None:
-    """Send a single OGG file as a PTT voice note."""
+async def send_voice_note(page, phone: str, ogg_path: Path, title: str = None) -> None:
+    """Send a single OGG file as a PTT voice note, labeled with a text message first."""
     chat_id = f'{phone}@c.us'
+
+    # Determine label for the voice note
+    label = title if title else ogg_path.stem
+    if not title:
+        # Clean filename stem to get a nice title:
+        # Remove leading numbers/symbols, replace underscores/hyphens with spaces
+        label = re.sub(r'^\d+[\s_\-]+', '', label)
+        label = label.replace('_', ' ').replace('-', ' ')
+        label = re.sub(r'\s+', ' ', label).strip()
+
+    # Send text label first
+    print(f'Sending label "📖 {label}" to {phone}...')
+    label_result = await page.evaluate(
+        """async ([chatId, text]) => {
+            try {
+                const msg = await WPP.chat.sendTextMessage(chatId, text);
+                return { ok: true, id: msg.id?.toString() || 'sent' };
+            } catch (e) {
+                return { ok: false, error: e.message || String(e) };
+            }
+        }""",
+        [chat_id, f'📖 {label}'],
+    )
+    if not label_result.get('ok'):
+        print(f'⚠️ Warning: Failed to send label: {label_result.get("error")}', file=sys.stderr)
+    else:
+        # Small delay to ensure the text message registers first in WhatsApp's layout
+        await asyncio.sleep(0.5)
+
     audio_bytes = ogg_path.read_bytes()
     b64 = base64.b64encode(audio_bytes).decode('ascii')
     data_uri = f'data:audio/ogg;codecs=opus;base64,{b64}'
