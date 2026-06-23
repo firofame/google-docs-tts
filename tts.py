@@ -23,7 +23,7 @@ CONFIG = {
     'profile_dir': Path.home() / '.google-docs-tts-profile',
     'debug': True,
     'save_success_screenshots': False,
-    'headless': True,
+    'headless': False,
     'google_credentials_json': 'credentials.json',
 }
 
@@ -174,7 +174,7 @@ def parse_args() -> Args:
     return Args(jobs=jobs, send_phone=send_phone)
 
 
-def split_long_sentence(sentence: str, max_len: int = 280) -> list[str]:
+def split_long_sentence(sentence: str, max_len: int = 180) -> list[str]:
     """Split a sentence into smaller chunks to avoid Google Docs TTS limits."""
     if len(sentence) <= max_len:
         return [sentence]
@@ -524,6 +524,18 @@ async def generate_audio(page: Any) -> str:
             if await error_loc.is_visible():
                 raise RuntimeError("Google Docs TTS error: Audio generation was unsuccessful")
                 
+            # Check for general Google Docs butterbar / error notification
+            butterbar = page.locator('.jfk-butterBar-shown, .jfk-butterBar')
+            if await butterbar.is_visible():
+                text = await butterbar.inner_text()
+                if text.strip():
+                    raise RuntimeError(f"Google Docs Butterbar error: {text.strip()}")
+                
+            # Check for 20,000 character limit warning toast/snackbar
+            limit_loc = page.locator("text=reduce the text length to 20000 characters")
+            if await limit_loc.is_visible():
+                raise RuntimeError("Google Docs TTS error: Text length exceeds 20000 characters limit")
+
             elapsed_ms = (asyncio.get_event_loop().time() - start_time) * 1000
             if elapsed_ms >= timeout_ms:
                 raise asyncio.TimeoutError("Timeout waiting for audio player to appear")
@@ -728,11 +740,7 @@ async def main():
                         print(f'⏭️  {out} already exists, skipping.')
                         continue
                     
-                    # Prepend spoken title to the first chunk only
-                    if i == 0:
-                        chunk_to_process = f"{spoken_title}.\n\n{chunk}"
-                    else:
-                        chunk_to_process = chunk
+                    chunk_to_process = chunk
 
                     current_text = chunk_to_process
                     while True:
@@ -828,6 +836,8 @@ def run() -> None:
     try:
         asyncio.run(main())
     except Exception as err:
+        import traceback
+        traceback.print_exc()
         print(f'Error: {err}', file=sys.stderr)
         sys.exit(1)
 
