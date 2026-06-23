@@ -15,6 +15,7 @@ import sys
 import re
 import base64
 import asyncio
+import subprocess
 from pathlib import Path
 from playwright.async_api import async_playwright
 
@@ -41,7 +42,7 @@ async def inject_wpp(page) -> None:
 
 
 async def send_voice_note(page, phone: str, ogg_path: Path, title: str = None) -> None:
-    """Send a single OGG file as a PTT voice note, labeled with a text message first."""
+    """Send an OGG file as a PTT voice note. If it exceeds 16 MB, split it and send each part."""
     chat_id = f'{phone}@c.us'
 
     # Determine label for the voice note
@@ -52,6 +53,53 @@ async def send_voice_note(page, phone: str, ogg_path: Path, title: str = None) -
         label = re.sub(r'^\d+[\s_\-]+', '', label)
         label = label.replace('_', ' ').replace('-', ' ')
         label = re.sub(r'\s+', ' ', label).strip()
+
+    file_size_mb = ogg_path.stat().st_size / (1024 * 1024)
+    if file_size_mb > 16.0:
+        print(f'⚠️ Audio file size ({file_size_mb:.2f} MB) exceeds WhatsApp 16 MB limit. Splitting final audio...')
+        # For 64 kbps mono ogg/opus, 1 MB is ~125 seconds. 13 MB is ~1625 seconds (~27 mins).
+        # We will split into safe ~20-minute segments (1200 seconds)
+        segment_time = 1200
+        output_pattern = ogg_path.parent / f"{ogg_path.stem}_part_%02d.ogg"
+        
+        try:
+            result = subprocess.run(
+                [
+                    'ffmpeg',
+                    '-y',
+                    '-i', str(ogg_path),
+                    '-f', 'segment',
+                    '-segment_time', str(segment_time),
+                    '-c', 'copy',
+                    str(output_pattern)
+                ],
+                check=False,
+                capture_output=True
+            )
+            if result.returncode != 0:
+                print(f"❌ ffmpeg splitting failed: {result.stderr.decode('utf-8', errors='replace')}", file=sys.stderr)
+                sys.exit(1)
+            
+            # Find generated segment files
+            segment_files = sorted(ogg_path.parent.glob(f"{ogg_path.stem}_part_*.ogg"))
+            if not segment_files:
+                print("❌ Failed to find split audio segments.", file=sys.stderr)
+                sys.exit(1)
+                
+            print(f"✅ Split audio into {len(segment_files)} segment(s).")
+            
+            for index, segment_file in enumerate(segment_files):
+                part_title = f"{label} - ഭാഗം {index + 1}"
+                # Recurse to send this segment (which is guaranteed to be under 16 MB)
+                await send_voice_note(page, phone, segment_file, title=part_title)
+                # Clean up temporary split file after sending
+                if segment_file.exists():
+                    segment_file.unlink()
+                    
+            return
+        except Exception as e:
+            print(f"❌ Error during audio splitting: {e}", file=sys.stderr)
+            sys.exit(1)
 
     # Send text label first
     print(f'Sending label "📖 {label}" to {phone}...')
