@@ -20,7 +20,7 @@ CONFIG = {
     'doc_url': 'https://docs.google.com/document/d/1WVxgs-UywesdGppo1zLFR-YA57TQiwEpXDjKoq9EfyM/edit?usp=sharing',
     'max_chunk_length': 20_000,
     'timeout': 120_000,
-    'profile_dir': Path.home() / '.google-docs-tts-profile',
+    'profile_dir': Path.home() / '.firofame-profile',
     'debug': True,
     'save_success_screenshots': False,
     'headless': False,
@@ -75,7 +75,6 @@ class Args:
     """Command line arguments."""
     jobs: list[FileJob]
     login_only: bool = False
-    send_phone: str | None = None
 
 
 def parse_args() -> Args:
@@ -99,19 +98,10 @@ def parse_args() -> Args:
         use_ogg = True
         args.remove('--opus')
 
-    send_phone = '919895822141'
-    if '--send' in args:
-        idx = args.index('--send')
-        if idx + 1 >= len(args):
-            print('Error: --send requires a phone number (e.g. --send 919876543210)', file=sys.stderr)
-            sys.exit(1)
-        send_phone = args[idx + 1]
-        del args[idx:idx + 2]
-
     if not args:
         print(
-            'Usage: python tts.py [--debug] [--headless] [--no-headless] [--opus] [--send PHONE] --login | input_path [output_path|output_dir]\n'
-            '       python tts.py [--debug] [--headless] [--no-headless] [--opus] [--send PHONE] input_file1 [input_file2 ...] [output_dir]',
+            'Usage: python tts.py [--debug] [--headless] [--no-headless] [--opus] --login | input_path [output_path|output_dir]\n'
+            '       python tts.py [--debug] [--headless] [--no-headless] [--opus] input_file1 [input_file2 ...] [output_dir]',
             file=sys.stderr,
         )
         sys.exit(1)
@@ -171,7 +161,7 @@ def parse_args() -> Args:
             out_path = (output_dir / f.with_suffix(suffix).name) if output_dir else f.with_suffix(suffix)
             jobs.append(FileJob(input_path=f, output_path=out_path))
 
-    return Args(jobs=jobs, send_phone=send_phone)
+    return Args(jobs=jobs)
 
 
 def split_long_sentence(sentence: str, max_len: int = 180) -> list[str]:
@@ -608,33 +598,6 @@ async def main():
     """Main entry point."""
     args = parse_args()
 
-    # Set up WhatsApp sender if --send was provided
-    wa_page = None
-    wa_context = None
-    wa_playwright = None
-    if args.send_phone:
-        from send_whatsapp import (
-            inject_wpp,
-            send_voice_note,
-            wait_for_whatsapp_ready,
-            PROFILE_DIR as WA_PROFILE_DIR,
-            WA_JS_CDN,
-        )
-        WA_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
-        wa_playwright = await async_playwright().start()
-        wa_context = await wa_playwright.chromium.launch_persistent_context(
-            user_data_dir=str(WA_PROFILE_DIR),
-            headless=False,
-            bypass_csp=True,
-            ignore_default_args=['--enable-automation'],
-            args=['--disable-blink-features=AutomationControlled'],
-        )
-        wa_page = wa_context.pages[0] if wa_context.pages else await wa_context.new_page()
-        await wa_page.goto('https://web.whatsapp.com/', wait_until='domcontentloaded')
-        await wait_for_whatsapp_ready(wa_page)
-        await inject_wpp(wa_page)
-        print('📱 WhatsApp Web ready for sending.')
-
     CONFIG['profile_dir'].mkdir(parents=True, exist_ok=True)
 
     is_headless = CONFIG['headless'] if not args.login_only else False
@@ -799,11 +762,6 @@ async def main():
                             except Exception:
                                 pass
 
-                # Auto-send via WhatsApp if --send was provided
-                if wa_page and job.output_path.exists() and job.output_path.suffix.lower() == '.ogg':
-                    print(f'\n📱 Sending {job.output_path.name} to {args.send_phone}...')
-                    await send_voice_note(wa_page, args.send_phone, job.output_path, title=spoken_title)
-
             print('\nAll files processed successfully!')
         finally:
             await page.close()
@@ -818,17 +776,7 @@ async def main():
                 await p.stop()
             except Exception:
                 pass
-        # Clean up WhatsApp browser if opened
-        if wa_context:
-            try:
-                await wa_context.close()
-            except Exception:
-                pass
-        if wa_playwright:
-            try:
-                await wa_playwright.stop()
-            except Exception:
-                pass
+
 
 
 def run() -> None:

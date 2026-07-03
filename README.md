@@ -130,7 +130,7 @@ You can customize the script settings by editing the `CONFIG` dictionary in [`tt
 | `doc_url` | `'https://docs.google.com/.../edit'` | The URL of the Google Doc used for TTS processing. |
 | `max_chunk_length`| `20_000` | Maximum character length for each audio chunk. |
 | `timeout` | `120_000` | Playwright operations timeout in milliseconds. |
-| `profile_dir` | `~/.google-docs-tts-profile` | Directory where the Playwright browser profile/session is stored. |
+| `profile_dir` | `~/.firofame-profile` | Directory where the Playwright browser profile/session is stored. |
 | `google_credentials_json` | `'credentials.json'` | Path to the service account credentials JSON file. |
 | `save_success_screenshots` | `False` | Save screenshots on successful text insertion and audio generation. |
 | `debug` | `True` | Whether to print verbose debug output. |
