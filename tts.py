@@ -2,7 +2,6 @@
 
 import os
 import sys
-import base64
 import asyncio
 import re
 import subprocess
@@ -24,7 +23,7 @@ CONFIG = {
     'debug': True,
     'save_success_screenshots': False,
     'headless': False,
-    'google_credentials_json': 'credentials.json',
+    'google_credentials_json': '/Users/firozahmed/Documents/gen-lang-client-0282610083-ed211e26d114.json',
 }
 
 SELECTORS = {
@@ -34,6 +33,15 @@ SELECTORS = {
     'player_max_time': '.docsUiWizAudioSliderMaxTime',
     'player_close': '.kixAudioPlayerPaletteCloseButton[aria-label="Close"]',
 }
+
+OPUS_ARGS = [
+    '-c:a', 'libopus',
+    '-b:a', '64k',
+    '-ac', '1',
+    '-ar', '48000',
+    '-application', 'voip',
+    '-f', 'ogg',
+]
 
 
 def get_doc_id(url: str) -> str:
@@ -93,9 +101,7 @@ def parse_args() -> Args:
         CONFIG['headless'] = False
         args.remove('--no-headless')
 
-    use_ogg = True
     if '--opus' in args:
-        use_ogg = True
         args.remove('--opus')
 
     if not args:
@@ -109,10 +115,8 @@ def parse_args() -> Args:
     if args[0] == '--login':
         return Args(jobs=[], login_only=True)
 
-    # Resolve paths
     resolved_paths = [Path(a).resolve() for a in args]
 
-    # Check if the last argument should be treated as output dir
     output_dir = None
     if len(resolved_paths) > 1:
         last_path = resolved_paths[-1]
@@ -120,46 +124,31 @@ def parse_args() -> Args:
             output_dir = last_path
             resolved_paths.pop()
 
-    jobs = []
-    suffix = '.ogg' if use_ogg else '.mp3'
-
-    # If we have only one path left and it's a directory, expand it
     if len(resolved_paths) == 1 and resolved_paths[0].is_dir():
         input_dir = resolved_paths[0]
-        files = sorted([
+        resolved_paths = sorted(
             p for p in input_dir.iterdir()
             if p.is_file() and p.suffix.lower() in ('.md', '.txt')
-        ])
-        if not files:
+        )
+        if not resolved_paths:
             print(f"No .md or .txt files found in directory: {input_dir}", file=sys.stderr)
             sys.exit(1)
-            
-        for f in files:
-            out_path = (output_dir / f.with_suffix(suffix).name) if output_dir else f.with_suffix(suffix)
-            jobs.append(FileJob(input_path=f, output_path=out_path))
-
-    elif len(resolved_paths) == 1:
-        f = resolved_paths[0]
-        if f.is_dir():
-            print(f"Error: {f} is a directory but expected files.", file=sys.stderr)
-            sys.exit(1)
-        out_path = (output_dir / f.with_suffix(suffix).name) if output_dir else f.with_suffix(suffix)
-        jobs.append(FileJob(input_path=f, output_path=out_path))
-
     elif len(resolved_paths) == 2 and not output_dir:
         infile = resolved_paths[0]
         outfile = resolved_paths[1]
         if not outfile.suffix:
-            outfile = outfile.with_suffix(suffix)
-        jobs.append(FileJob(input_path=infile, output_path=outfile))
+            outfile = outfile.with_suffix('.ogg')
+        return Args(jobs=[FileJob(input_path=infile, output_path=outfile)])
 
-    else:
-        for f in resolved_paths:
-            if f.is_dir():
-                print(f"Error: {f} is a directory. Multiple inputs must be files.", file=sys.stderr)
-                sys.exit(1)
-            out_path = (output_dir / f.with_suffix(suffix).name) if output_dir else f.with_suffix(suffix)
-            jobs.append(FileJob(input_path=f, output_path=out_path))
+    jobs = []
+    for path in resolved_paths:
+        if path.is_dir():
+            print(f"Error: {path} is a directory. Multiple inputs must be files.", file=sys.stderr)
+            sys.exit(1)
+        output = path.with_suffix('.ogg')
+        if output_dir:
+            output = output_dir / output.name
+        jobs.append(FileJob(input_path=path, output_path=output))
 
     return Args(jobs=jobs)
 
@@ -193,29 +182,6 @@ def split_long_sentence(sentence: str, max_len: int = 180) -> list[str]:
         parts.append(part_text)
         
     return parts
-
-
-def process_text_by_splitting_sentences(text: str, max_sentence_len: int = 280) -> str:
-    """Process all paragraphs in the text, splitting any extra-long sentences."""
-    paragraphs = text.split('\n')
-    processed_paragraphs = []
-    for para in paragraphs:
-        if not para.strip():
-            processed_paragraphs.append(para)
-            continue
-        
-        # Split paragraph into sentences using basic sentence-ending punctuation
-        raw_sentences = re.split(r'(?<=[.!?])\s+', para)
-        new_sentences = []
-        for s in raw_sentences:
-            s_clean = s.strip()
-            if not s_clean:
-                continue
-            split_s = split_long_sentence(s_clean, max_sentence_len)
-            new_sentences.extend(split_s)
-        
-        processed_paragraphs.append(" ".join(new_sentences))
-    return "\n".join(processed_paragraphs)
 
 
 def dissect_first_long_sentence(text: str, max_len: int = 280) -> tuple[str, bool]:
@@ -293,19 +259,6 @@ def suffix_path(file_path: Path, suffix: str) -> Path:
     return file_path.with_name(f"{file_path.stem}{suffix}{file_path.suffix}")
 
 
-def get_clean_title(filename_stem: str) -> str:
-    """Clean filename stem to get a spoken title."""
-    # Remove leading sequence numbers, like '01_' or '01 - ' or '01_ഒന്നാം_...'
-    cleaned = re.sub(r'^\d+[\s_\-]+', '', filename_stem)
-    # Replace underscores with spaces
-    cleaned = cleaned.replace('_', ' ')
-    # Collapse multiple spaces
-    cleaned = re.sub(r'\s+', ' ', cleaned).strip()
-    return cleaned
-
-
-
-
 async def click(page: Any, selector: str):
     """Click first matching element."""
     await page.locator(selector).first.click(timeout=CONFIG['timeout'])
@@ -337,73 +290,44 @@ def _ffmpeg_concat_line(path: Path) -> str:
     return f"file '{escaped}'\n"
 
 
-def convert_mp3_to_ogg_opus(mp3_path: Path, ogg_path: Path) -> bool:
-    """Convert an MP3 file to OGG/Opus matching WhatsApp voice note format."""
+def run_ffmpeg(args: list[str], action: str) -> bool:
+    """Run ffmpeg and report conversion or concatenation errors."""
     try:
         result = subprocess.run(
-            [
-                'ffmpeg',
-                '-y',
-                '-i',
-                str(mp3_path),
-                '-c:a', 'libopus',
-                '-b:a', '64k',
-                '-ac', '1',           # mono
-                '-ar', '48000',       # 48 kHz sample rate (Opus native)
-                '-application', 'voip',
-                '-f', 'ogg',          # OGG container
-                str(ogg_path),
-            ],
+            ['ffmpeg', '-y', *args],
             check=False,
             capture_output=True,
         )
         if result.returncode != 0:
-            print(f"❌ ffmpeg conversion to OGG/Opus failed: {result.stderr.decode('utf-8', errors='replace')}", file=sys.stderr)
+            print(f"❌ ffmpeg {action} failed: {result.stderr.decode('utf-8', errors='replace')}", file=sys.stderr)
         return result.returncode == 0
-    except Exception as e:
+    except OSError as e:
         print(f"❌ Error running ffmpeg: {e}", file=sys.stderr)
         return False
 
 
+def convert_mp3_to_ogg_opus(mp3_path: Path, ogg_path: Path) -> bool:
+    """Convert an MP3 file to OGG/Opus matching WhatsApp voice note format."""
+    return run_ffmpeg(
+        ['-i', str(mp3_path), *OPUS_ARGS, str(ogg_path)],
+        'conversion to OGG/Opus',
+    )
+
+
 def concatenate_audio_chunks(chunk_paths: list[Path], output_path: Path) -> bool:
-    """Concatenate MP3 chunks with ffmpeg if available, encoding to Opus if output_path is .opus."""
+    """Concatenate MP3 chunks, encoding to Opus for .ogg output."""
     list_file = output_path.parent / 'ffmpeg_concat_list.txt'
-    target_is_ogg = output_path.suffix.lower() == '.ogg'
-    
-    # WhatsApp voice note compatible OGG/Opus encoding, or plain MP3 stream copy
-    codec_args = [
-        '-c:a', 'libopus',
-        '-b:a', '64k',
-        '-ac', '1',            # mono
-        '-ar', '48000',        # 48 kHz sample rate (Opus native)
-        '-application', 'voip',
-        '-f', 'ogg',           # OGG container
-    ] if target_is_ogg else ['-c', 'copy']
+    codec_args = OPUS_ARGS if output_path.suffix.lower() == '.ogg' else ['-c', 'copy']
 
     try:
-        with open(list_file, 'w', encoding='utf-8') as f:
-            for chunk_path in chunk_paths:
-                f.write(_ffmpeg_concat_line(chunk_path))
-
-        result = subprocess.run(
-            [
-                'ffmpeg',
-                '-y',
-                '-f',
-                'concat',
-                '-safe',
-                '0',
-                '-i',
-                str(list_file),
-            ] + codec_args + [
-                str(output_path),
-            ],
-            check=False,
-            capture_output=True,
+        list_file.write_text(
+            ''.join(_ffmpeg_concat_line(path) for path in chunk_paths),
+            encoding='utf-8',
         )
-        if result.returncode != 0:
-            print(f"❌ ffmpeg concatenation failed: {result.stderr.decode('utf-8', errors='replace')}", file=sys.stderr)
-        return result.returncode == 0
+        return run_ffmpeg(
+            ['-f', 'concat', '-safe', '0', '-i', str(list_file), *codec_args, str(output_path)],
+            'concatenation',
+        )
     finally:
         if list_file.exists():
             list_file.unlink()
@@ -594,190 +518,97 @@ async def login_flow(context):
     await page.close()
 
 
+async def process_file(page: Any, creds: Any, doc_id: str, job: FileJob):
+    """Generate and assemble audio for one file, resuming existing output."""
+    output = job.output_path
+    output.parent.mkdir(parents=True, exist_ok=True)
+    if output.exists() and output.stat().st_size > 0:
+        print(f'⏭️  {output} already exists, skipping entire file.')
+        return
+
+    chunks = split_text(job.input_path.read_text(encoding='utf-8'))
+    print(f'Split into {len(chunks)} chunk(s)...')
+    target_is_ogg = output.suffix.lower() == '.ogg'
+    audio_path = output.with_suffix('.mp3') if target_is_ogg else output
+    chunk_paths = [
+        suffix_path(audio_path, f'-{i + 1}') if len(chunks) > 1 else audio_path
+        for i in range(len(chunks))
+    ]
+
+    for i, (text, path) in enumerate(zip(chunks, chunk_paths), start=1):
+        print(f'\n--- Chunk {i}/{len(chunks)} ---')
+        if path.exists() and path.stat().st_size > 0:
+            print(f'⏭️  {path} already exists, skipping.')
+            continue
+        while True:
+            try:
+                await process_chunk(page, creds, doc_id, text, path)
+                await close_player(page)
+                break
+            except RuntimeError as err:
+                if "Audio generation was unsuccessful" in str(err):
+                    text, split_done = dissect_first_long_sentence(text, 280)
+                    if split_done:
+                        print("⚠️ Audio generation failed. Dissecting the first long sentence and retrying...")
+                        continue
+                raise
+
+    if len(chunks) > 1:
+        if not all(path.exists() for path in chunk_paths):
+            raise RuntimeError("Cannot concatenate: not all chunk files are present.")
+        print('\nConcatenating audio chunks...')
+        if not concatenate_audio_chunks(chunk_paths, output):
+            raise RuntimeError("ffmpeg concatenation failed. Individual chunks are preserved.")
+    elif len(chunks) == 1 and target_is_ogg:
+        print('\nConverting single chunk to OGG/Opus...')
+        if not convert_mp3_to_ogg_opus(audio_path, output):
+            raise RuntimeError("OGG/Opus conversion failed. Preserving MP3 file.")
+    else:
+        return
+
+    for path in chunk_paths:
+        path.unlink()
+    print(f'✅ Final audiobook saved as {output}')
+
+
 async def main():
-    """Main entry point."""
+    """Set up the browser and process file jobs sequentially."""
     args = parse_args()
-
     CONFIG['profile_dir'].mkdir(parents=True, exist_ok=True)
+    is_headless = CONFIG['headless'] and not args.login_only
+    mode = 'headless' if is_headless else 'visible'
+    print(f"Launching local persistent {mode} Chromium browser (Profile: {CONFIG['profile_dir']})...")
 
-    is_headless = CONFIG['headless'] if not args.login_only else False
-
-    p = await async_playwright().start()
-    try:
-        if is_headless:
-            print(f"Launching local persistent headless Chromium browser (Profile: {CONFIG['profile_dir']})...")
-            context = await p.chromium.launch_persistent_context(
-                user_data_dir=str(CONFIG['profile_dir']),
-                headless=True,
-                bypass_csp=True,
-                ignore_default_args=['--enable-automation'],
-                args=['--disable-blink-features=AutomationControlled', '--mute-audio']
-            )
-        else:
-            mode_desc = "to save login session " if args.login_only else ""
-            print(f"Launching local persistent visible Chromium browser {mode_desc}(Profile: {CONFIG['profile_dir']})...")
-            context = await p.chromium.launch_persistent_context(
-                user_data_dir=str(CONFIG['profile_dir']),
-                headless=False,
-                bypass_csp=True,
-                ignore_default_args=['--enable-automation'],
-                args=['--disable-blink-features=AutomationControlled', '--mute-audio']
-            )
-
-        if args.login_only:
-            await login_flow(context)
-            print('Login session saved.')
-            return
-
-        if not args.jobs:
-            print("❌ No input files specified to process.", file=sys.stderr)
-            sys.exit(1)
-
-        # Authenticate with Google Docs API once
+    async with async_playwright() as p:
+        context = await p.chromium.launch_persistent_context(
+            user_data_dir=str(CONFIG['profile_dir']),
+            headless=is_headless,
+            bypass_csp=True,
+            ignore_default_args=['--enable-automation'],
+            args=['--disable-blink-features=AutomationControlled', '--mute-audio'],
+        )
         try:
+            if args.login_only:
+                await login_flow(context)
+                print('Login session saved.')
+                return
+            if not args.jobs:
+                raise ValueError("No input files specified to process.")
+
             google_creds = get_google_credentials()
             doc_id = get_doc_id(CONFIG['doc_url'])
-        except Exception as e:
-            print(f"❌ Google Docs API authentication error: {e}", file=sys.stderr)
-            sys.exit(1)
-
-        print(f"Starting browser page for {len(args.jobs)} file(s)...")
-        page = await open_tts_page(context)
-
-        try:
-            for job_idx, job in enumerate(args.jobs):
-                print(f"\n==================================================")
-                print(f"Processing File {job_idx + 1}/{len(args.jobs)}")
-                print(f"Input:  {job.input_path}")
-                print(f"Output: {job.output_path}")
-                print(f"==================================================")
-
-                # Ensure output directory exists
-                job.output_path.parent.mkdir(parents=True, exist_ok=True)
-
-                # Resume support: skip if the final concatenated file already exists
-                if job.output_path.exists() and job.output_path.stat().st_size > 0:
-                    print(f'⏭️  {job.output_path} already exists, skipping entire file.')
-                    continue
-
-                text = job.input_path.read_text(encoding='utf-8')
-                chunks = split_text(text)
-                print(f'Split into {len(chunks)} chunk(s)...')
-
-                # Parse title and part number from filename stem
-                stem = job.input_path.stem
-                part_match = re.search(r'[\s_]+Part[\s_]*(\d+)$', stem, re.IGNORECASE)
-                if part_match:
-                    part_num = int(part_match.group(1))
-                    title_part = stem[:-len(part_match.group(0))]
-                else:
-                    part_num = None
-                    title_part = stem
-
-                cleaned_title = get_clean_title(title_part)
-                has_malayalam = bool(re.search(r'[\u0d00-\u0d7f]', cleaned_title))
-                if part_num is not None:
-                    part_label = f"ഭാഗം {part_num}" if has_malayalam else f"Part {part_num}"
-                    spoken_title = f"{cleaned_title} - {part_label}"
-                else:
-                    spoken_title = cleaned_title
-
-                target_is_ogg = job.output_path.suffix.lower() == '.ogg'
-
-                for i, chunk in enumerate(chunks):
-                    print(f'\n--- Chunk {i + 1}/{len(chunks)} ---')
-
-                    if len(chunks) > 1:
-                        if target_is_ogg:
-                            out = suffix_path(job.output_path.with_suffix('.mp3'), f'-{i + 1}')
-                        else:
-                            out = suffix_path(job.output_path, f'-{i + 1}')
-                    else:
-                        if target_is_ogg:
-                            out = job.output_path.with_suffix('.mp3')
-                        else:
-                            out = job.output_path
-
-                    # Resume support: skip chunks already on disk
-                    if out.exists() and out.stat().st_size > 0:
-                        print(f'⏭️  {out} already exists, skipping.')
-                        continue
-                    
-                    chunk_to_process = chunk
-
-                    current_text = chunk_to_process
-                    while True:
-                        try:
-                            await process_chunk(page, google_creds, doc_id, current_text, out)
-                            await close_player(page)
-                            break
-                        except RuntimeError as err:
-                            if "Audio generation was unsuccessful" in str(err):
-                                new_text, split_done = dissect_first_long_sentence(current_text, 280)
-                                if split_done:
-                                    print("⚠️ Audio generation failed. Dissecting the first long sentence and retrying...")
-                                    current_text = new_text
-                                    continue
-                            raise
-
-                # Concatenate multiple audio chunks into a single file
-                if len(chunks) > 1:
-                    if target_is_ogg:
-                        chunk_paths = [
-                            suffix_path(job.output_path.with_suffix('.mp3'), f'-{i + 1}')
-                            for i in range(len(chunks))
-                        ]
-                    else:
-                        chunk_paths = [
-                            suffix_path(job.output_path, f'-{i + 1}')
-                            for i in range(len(chunks))
-                        ]
-                    chunks_exist = all(chunk_path.exists() for chunk_path in chunk_paths)
-                    
-                    if chunks_exist:
-                        print('\nConcatenating audio chunks...')
-                        if concatenate_audio_chunks(chunk_paths, job.output_path):
-                            print(f'✅ Final audiobook saved as {job.output_path}')
-                            # Clean up individual chunk files
-                            for chunk_path in chunk_paths:
-                                if chunk_path.exists():
-                                    chunk_path.unlink()
-                            print(f'Cleaned up {len(chunks)} chunk files.')
-                        else:
-                            print('⚠️  ffmpeg concatenation failed.')
-                            print(f'Individual chunks are preserved as {job.output_path.stem}-N{job.output_path.suffix}')
-                    else:
-                        print('⚠️  Cannot concatenate: not all chunk files are present.')
-                elif len(chunks) == 1 and target_is_ogg:
-                    temp_mp3 = job.output_path.with_suffix('.mp3')
-                    if temp_mp3.exists():
-                        print('\nConverting single chunk to OGG/Opus...')
-                        if convert_mp3_to_ogg_opus(temp_mp3, job.output_path):
-                            temp_mp3.unlink()
-                            print(f'✅ Final audiobook saved as {job.output_path}')
-                        else:
-                            print('⚠️  OGG/Opus conversion failed. Preserving MP3 file.')
-                            try:
-                                temp_mp3.rename(job.output_path.with_suffix('.mp3'))
-                            except Exception:
-                                pass
-
-            print('\nAll files processed successfully!')
+            print(f"Starting browser page for {len(args.jobs)} file(s)...")
+            page = await open_tts_page(context)
+            try:
+                for i, job in enumerate(args.jobs, start=1):
+                    print(f"\n{'=' * 50}\nProcessing File {i}/{len(args.jobs)}")
+                    print(f"Input:  {job.input_path}\nOutput: {job.output_path}\n{'=' * 50}")
+                    await process_file(page, google_creds, doc_id, job)
+                print('\nAll files processed successfully!')
+            finally:
+                await page.close()
         finally:
-            await page.close()
-    finally:
-        if 'context' in locals():
-            try:
-                await context.close()
-            except Exception:
-                pass
-        if p:
-            try:
-                await p.stop()
-            except Exception:
-                pass
-
-
+            await context.close()
 
 def run() -> None:
     """Run the command line application."""
